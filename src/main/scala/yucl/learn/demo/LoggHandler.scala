@@ -16,7 +16,7 @@ import org.apache.flink.streaming.api.windowing.windows.TimeWindow
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer08
 import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
-import yucl.learn.demo.LoggHandler.UrlTime
+
 
 import scala.collection.immutable.HashMap.HashTrieMap
 import scala.collection.mutable
@@ -77,32 +77,25 @@ object LoggHandler {
       }
     })
 
-    case class Result(system: String, var count: Int, var bytes: Double, var sessionCount: Int, var ipCount: Int, var topUrl: mutable.TreeSet[UrlTime])
+    case class Result(var system: String, var count: Int, var bytes: Double, var sessionCount: Int, var ipCount: Int, var topUrl: mutable.TreeSet[UrlTime])
     val windowedData = timedData.keyBy(0)
       .window(TumblingEventTimeWindows.of(Time.seconds(300)))
 
     val resultData = windowedData.apply(new WindowFunction[AccLog, Result, Tuple, TimeWindow] {
       override def apply(key: Tuple, window: TimeWindow, input: Iterable[AccLog], out: Collector[Result]): Unit = {
         val map = new mutable.HashMap[String, Result]()
-        val sessionMap = new mutable.HashMap[String, mutable.HashSet[String]]()
-        val ipMap = new mutable.HashMap[String, mutable.HashSet[String]]()
-        val topUrlMap = new mutable.HashMap[String, mutable.TreeSet[UrlTime]]
+        val sessionSet = new mutable.HashSet[String]()
+        val ipSet = new mutable.HashSet[String]()
+        val urlSet = new mutable.TreeSet[UrlTime]()
         val topN = 10
+        var count = 0
+        var bytes = 0
         input.foreach(x => {
-          val r = map.getOrElse(x.system, new Result(x.system, 0, 0d, 0, 0, null))
-          r.count += 1
-          r.bytes += x.bytes
-          map.put(x.system, r)
-
-          val sessionSet = sessionMap.getOrElse(x.system, new mutable.HashSet[String]())
+          count += 1
+          bytes += x.bytes
           sessionSet += x.sessionid
-          sessionMap.put(x.system, sessionSet)
-
-          val ipSet = ipMap.getOrElse(x.system, new mutable.HashSet[String]())
           ipSet += x.clientip
-          ipMap.put(x.system, ipSet)
 
-          val urlSet = topUrlMap.getOrElse(x.system, new mutable.TreeSet[UrlTime])
           val v = urlSet.filter(u => u.url == x.uri && u.time < x.time).last
           if (v != null) {
             urlSet -= v
@@ -120,14 +113,61 @@ object LoggHandler {
 
           }
         })
-        map.foreach(x => {
-          x._2.sessionCount = sessionMap.get(x._1).get.size
-          x._2.ipCount = ipMap.get(x._1).get.size
-          x._2.topUrl = topUrlMap.get(x._1).get
-          out.collect(x._2)
-        })
+
+        out.collect(new Result(key.getField(0), count, bytes, sessionSet.size, ipSet.size, urlSet))
+
       }
     })
+
+
+    /* val resultData = windowedData.apply(new WindowFunction[AccLog, Result, Tuple, TimeWindow] {
+       override def apply(key: Tuple, window: TimeWindow, input: Iterable[AccLog], out: Collector[Result]): Unit = {
+         val map = new mutable.HashMap[String, Result]()
+         val sessionMap = new mutable.HashMap[String, mutable.HashSet[String]]()
+         val ipMap = new mutable.HashMap[String, mutable.HashSet[String]]()
+         val topUrlMap = new mutable.HashMap[String, mutable.TreeSet[UrlTime]]
+         val topN = 10
+         input.foreach(x => {
+           val r = map.getOrElse(x.system, new Result(x.system, 0, 0d, 0, 0, null))
+           r.count += 1
+           r.bytes += x.bytes
+           map.put(x.system, r)
+
+           val sessionSet = sessionMap.getOrElse(x.system, new mutable.HashSet[String]())
+           sessionSet += x.sessionid
+           sessionMap.put(x.system, sessionSet)
+
+           val ipSet = ipMap.getOrElse(x.system, new mutable.HashSet[String]())
+           ipSet += x.clientip
+           ipMap.put(x.system, ipSet)
+
+           val urlSet = topUrlMap.getOrElse(x.system, new mutable.TreeSet[UrlTime])
+           val v = urlSet.filter(u => u.url == x.uri && u.time < x.time).last
+           if (v != null) {
+             urlSet -= v
+             urlSet += new UrlTime(x.uri, x.time)
+           } else {
+             if (urlSet.size <= topN) {
+               urlSet += new UrlTime(x.uri, x.time)
+             } else {
+               val last = urlSet.last
+               if (x.time > last.time) {
+                 urlSet += new UrlTime(x.uri, x.time)
+                 urlSet -= urlSet.last
+               }
+             }
+
+           }
+         })
+         map.foreach(x => {
+           x._2.sessionCount = sessionMap.get(x._1).get.size
+           x._2.ipCount = ipMap.get(x._1).get.size
+           x._2.topUrl = topUrlMap.get(x._1).get
+           out.collect(x._2)
+         })
+       }
+     })
+ */
 
     resultData.print
 
