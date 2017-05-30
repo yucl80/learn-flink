@@ -108,10 +108,10 @@ object LoggHandler {
             urlSet -= v
             urlSet += new UrlTime(x.uri, x.time)
           } else {
-            val last = urlSet.last
             if (urlSet.size <= topN) {
               urlSet += new UrlTime(x.uri, x.time)
             } else {
+              val last = urlSet.last
               if (x.time > last.time) {
                 urlSet += new UrlTime(x.uri, x.time)
                 urlSet -= urlSet.last
