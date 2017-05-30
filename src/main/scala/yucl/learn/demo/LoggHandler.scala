@@ -76,63 +76,77 @@ object LoggHandler {
       }
     })
 
-    case class Result(system: String, var count: Int, var maxTime: Double, var bytes: Double, var sessionCount: Int, var ipCount: Int)
+    case class Result(system: String, var count: Int, var bytes: Double, var sessionCount: Int, var ipCount: Int, var topUrl: mutable.TreeSet[UrlTime])
     val windowedData = timedData.keyBy(0)
       .window(TumblingEventTimeWindows.of(Time.seconds(300)))
 
-    val resultData= windowedData.apply(new WindowFunction[AccLog, Result, Tuple, TimeWindow] {
-        override def apply(key: Tuple, window: TimeWindow, input: Iterable[AccLog], out: Collector[Result]): Unit = {
-          val map = new mutable.HashMap[String, Result]()
-          val sessionMap = new mutable.HashMap[String, mutable.HashSet[String]]()
-          val ipMap = new mutable.HashMap[String, mutable.HashSet[String]]()
-          val urlTopMap = new mutable.HashMap[String,mutable.HashMap[String,Double]]()
+    val resultData = windowedData.apply(new WindowFunction[AccLog, Result, Tuple, TimeWindow] {
+      override def apply(key: Tuple, window: TimeWindow, input: Iterable[AccLog], out: Collector[Result]): Unit = {
+        val map = new mutable.HashMap[String, Result]()
+        val sessionMap = new mutable.HashMap[String, mutable.HashSet[String]]()
+        val ipMap = new mutable.HashMap[String, mutable.HashSet[String]]()
+        val topUrlMap = new mutable.HashMap[String, mutable.TreeSet[UrlTime]]
+        val topN = 10
+        input.foreach(x => {
+          val r = map.getOrElse(x.system, new Result(x.system, 0, 0d, 0, 0, null))
+          r.count = r.count + 1
+          r.bytes += x.bytes
+          map.put(x.system, r)
 
-          input.foreach(x => {
-            val r = map.getOrElse(x.system, new Result(x.system, 0, 0d, 0d, 0, 0))
-            r.count = r.count + 1
-            r.bytes = x.bytes + 1
-            r.maxTime = Math.max(r.maxTime, x.time)
-            map.put(x.system, r)
+          val sessionSet = sessionMap.getOrElse(x.system, new mutable.HashSet[String]())
+          sessionSet += x.sessionid
+          sessionMap.put(x.system, sessionSet)
 
-            val sessionSet = sessionMap.getOrElse(x.system, new mutable.HashSet[String]())
-            sessionSet+= x.sessionid
-            sessionMap.put(x.system,sessionSet)
+          val ipSet = ipMap.getOrElse(x.system, new mutable.HashSet[String]())
+          ipSet += x.clientip
+          ipMap.put(x.system, ipSet)
 
-            val ipSet = ipMap.getOrElse(x.system,new mutable.HashSet[String]())
-            ipSet += x.clientip
-            ipMap.put(x.system,ipSet)
-
-          })
-          map.foreach(x => {
-            x._2.sessionCount = sessionMap.get(x._1).get.size
-            x._2.ipCount = ipMap.get(x._1).get.size
-            out.collect(x._2)
-          })
-        }
-      })
+          val urlSet = topUrlMap.getOrElse(x.system, new mutable.TreeSet[UrlTime])
+          val v = urlSet.filter(u => u.url == x.uri && u.time < x.time).last
+          if (v != null) {
+            urlSet -= v
+            urlSet += new UrlTime(x.uri, x.time)
+          } else {
+            urlSet += new UrlTime(x.uri, x.time)
+            if (urlSet.size > topN) {
+              urlSet -= urlSet.last
+            }
+          }
+        })
+        map.foreach(x => {
+          x._2.sessionCount = sessionMap.get(x._1).get.size
+          x._2.ipCount = ipMap.get(x._1).get.size
+          x._2.topUrl = topUrlMap.get(x._1).get
+          out.collect(x._2)
+        })
+      }
+    })
 
     resultData.print
 
-    /*val count = timedData.keyBy(0)
-      .window(TumblingEventTimeWindows.of(Time.seconds(300)))
-      .sum("count").map(x => new Tuple3[String, String, Int](x.system, "count", x.count))
-    val maxTime = timedData.keyBy(0)
-      .window(TumblingEventTimeWindows.of(Time.seconds(300)))
-      .max("time").map(x => new Tuple3[String, String, Double](x.system, "maxtime", x.time))
-    val sumBytes = timedData.keyBy(0)
-      .window(TumblingEventTimeWindows.of(Time.seconds(300)))
-      .sum("bytes").map(x => new Tuple3[String, String, Double](x.system, "sumBytes", x.bytes))
-    var joinedStreams = count.join(maxTime).where(x => x._1).equalTo(x => x._1)
-      .window(TumblingEventTimeWindows.of(Time.seconds(300)))
-      .apply(new JoinFunction[(String, String, Int), (String, String, Double), (String, Int, Double)] {
-        override def join(first: (String, String, Int), second: (String, String, Double)): (String, Int, Double) = {
-          (first._1, first._3, second._3)
-        }
-      }).print()
-*/
+    /*    val count = timedData.keyBy(0)
+          .window(TumblingEventTimeWindows.of(Time.seconds(300)))
+          .sum("count").map(x => new Tuple3[String, String, Int](x.system, "count", x.count))
+        val maxTime = timedData.keyBy(0)
+          .window(TumblingEventTimeWindows.of(Time.seconds(300)))
+          .max("time").map(x => new Tuple3[String, String, Double](x.system, "maxtime", x.time))
+        val sumBytes = timedData.keyBy(0)
+          .window(TumblingEventTimeWindows.of(Time.seconds(300)))
+          .sum("bytes").map(x => new Tuple3[String, String, Double](x.system, "sumBytes", x.bytes))
+        var joinedStreams = count.join(maxTime).where(x => x._1).equalTo(x => x._1)
+          .window(TumblingEventTimeWindows.of(Time.seconds(300)))
+          .apply(new JoinFunction[(String, String, Int), (String, String, Double), (String, Int, Double)] {
+            override def join(first: (String, String, Int), second: (String, String, Double)): (String, Int, Double) = {
+              (first._1, first._3, second._3)
+            }
+          }).print()
 
-    //maxTime.print()
-    //sumBytes.print()
+        sumBytes.addSink(new SinkFunction[(String, String, Double)]() {
+          override def invoke(value: (String, String, Double)): Unit = {
+
+          }
+        })*/
+
 
 
     try {
@@ -144,4 +158,18 @@ object LoggHandler {
     }
   }
 
+}
+
+
+class UrlTime(var url: String, var time: Double) extends Ordered[UrlTime] {
+  override def toString: String = {
+    url + " :" + time
+  }
+
+  def compare(that: UrlTime) = {
+    if (this.url == that.url)
+      0
+    else
+      this.time.compareTo(that.time)
+  }
 }
