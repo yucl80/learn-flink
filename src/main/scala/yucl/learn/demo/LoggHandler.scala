@@ -16,6 +16,7 @@ import org.apache.flink.streaming.api.windowing.windows.TimeWindow
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer08
 import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
+import yucl.learn.demo.LoggHandler.UrlTime
 
 import scala.collection.immutable.HashMap.HashTrieMap
 import scala.collection.mutable
@@ -89,7 +90,7 @@ object LoggHandler {
         val topN = 10
         input.foreach(x => {
           val r = map.getOrElse(x.system, new Result(x.system, 0, 0d, 0, 0, null))
-          r.count = r.count + 1
+          r.count += 1
           r.bytes += x.bytes
           map.put(x.system, r)
 
@@ -107,10 +108,16 @@ object LoggHandler {
             urlSet -= v
             urlSet += new UrlTime(x.uri, x.time)
           } else {
-            urlSet += new UrlTime(x.uri, x.time)
-            if (urlSet.size > topN) {
-              urlSet -= urlSet.last
+            val last = urlSet.last
+            if (urlSet.size <= topN) {
+              urlSet += new UrlTime(x.uri, x.time)
+            } else {
+              if (x.time > last.time) {
+                urlSet += new UrlTime(x.uri, x.time)
+                urlSet -= urlSet.last
+              }
             }
+
           }
         })
         map.foreach(x => {
