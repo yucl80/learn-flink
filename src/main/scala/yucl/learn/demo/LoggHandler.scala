@@ -1,11 +1,12 @@
 package yucl.learn.demo
 
+import java.sql.Timestamp
 import java.text.SimpleDateFormat
 import java.util.Properties
 
 import org.apache.flink.api.common.functions.MapFunction
 import org.apache.flink.api.java.tuple.Tuple
-import org.apache.flink.streaming.api.TimeCharacteristic
+import org.apache.flink.streaming.api.{CheckpointingMode, TimeCharacteristic}
 import org.apache.flink.streaming.api.functions.AssignerWithPeriodicWatermarks
 import org.apache.flink.streaming.api.scala.function.WindowFunction
 import org.apache.flink.streaming.api.scala.{DataStream, StreamExecutionEnvironment, _}
@@ -16,7 +17,6 @@ import org.apache.flink.streaming.api.windowing.windows.TimeWindow
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer08
 import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
-
 
 import scala.collection.immutable.HashMap.HashTrieMap
 import scala.collection.mutable
@@ -33,6 +33,8 @@ object LoggHandler {
     properties.setProperty("group.id", "key-words-alert")
     val env: StreamExecutionEnvironment = StreamExecutionEnvironment.getExecutionEnvironment
     env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
+    env.enableCheckpointing(60000,CheckpointingMode.AT_LEAST_ONCE)
+
     val stream: DataStream[String] = env.addSource(new FlinkKafkaConsumer08[String]("parsed-acclog", new SimpleStringSchema, properties))
     val data = stream.map(new MapFunction[String, AccLog] {
       override def map(value: String): AccLog = {
@@ -51,7 +53,7 @@ object LoggHandler {
             j.getOrElse("time", 0d).asInstanceOf[Double],
             timestamp,
             1,
-            j.getOrElse("message", 0d).asInstanceOf[String]
+            j.getOrElse("uri", "").asInstanceOf[String]
           )
         } catch {
           case e: Exception => {
@@ -63,7 +65,7 @@ object LoggHandler {
       }
     }).filter(x => x != null)
     val timedData = data.assignTimestampsAndWatermarks(new AssignerWithPeriodicWatermarks[AccLog] {
-      val maxOutOfOrderness = 5 // 3.5 seconds
+      val maxOutOfOrderness = 5000 // 3.5 seconds
       var currentMaxTimestamp = 0L
 
       override def extractTimestamp(element: AccLog, previousElementTimestamp: Long): Long = {
@@ -77,29 +79,32 @@ object LoggHandler {
       }
     })
 
-    case class Result(var system: String, var count: Int, var bytes: Double, var sessionCount: Int, var ipCount: Int, var topUrl: mutable.TreeSet[UrlTime])
+    case class Result(var system: String, var count: Int, var bytes: Double, var sessionCount: Int, var ipCount: Int, var topUrl: mutable.Set[UrlTime],var timestamp: Timestamp)
     val windowedData = timedData.keyBy(0)
-      .window(TumblingEventTimeWindows.of(Time.seconds(300)))
+      .window(TumblingEventTimeWindows.of(Time.minutes(5)))
+
 
     val resultData = windowedData.apply(new WindowFunction[AccLog, Result, Tuple, TimeWindow] {
       override def apply(key: Tuple, window: TimeWindow, input: Iterable[AccLog], out: Collector[Result]): Unit = {
-        val map = new mutable.HashMap[String, Result]()
         val sessionSet = new mutable.HashSet[String]()
         val ipSet = new mutable.HashSet[String]()
         val urlSet = new mutable.TreeSet[UrlTime]()
         val topN = 10
         var count = 0
-        var bytes = 0
+        var bytes = 0d
         input.foreach(x => {
           count += 1
           bytes += x.bytes
           sessionSet += x.sessionid
           ipSet += x.clientip
 
-          val v = urlSet.filter(u => u.url == x.uri && u.time < x.time).last
-          if (v != null) {
-            urlSet -= v
-            urlSet += new UrlTime(x.uri, x.time)
+          val vs = urlSet.filter(u => u.uri == x.uri )
+          if (vs.size > 0) {
+            val f = vs.last
+            if(f.time < x.time){
+              urlSet -= vs.last
+              urlSet += new UrlTime(x.uri, x.time)
+            }
           } else {
             if (urlSet.size <= topN) {
               urlSet += new UrlTime(x.uri, x.time)
@@ -114,7 +119,7 @@ object LoggHandler {
           }
         })
 
-        out.collect(new Result(key.getField(0), count, bytes, sessionSet.size, ipSet.size, urlSet))
+        out.collect(new Result(key.getField(0), count, bytes, sessionSet.size, ipSet.size, urlSet,new Timestamp(window.getEnd)))
 
       }
     })
@@ -169,7 +174,7 @@ object LoggHandler {
      })
  */
 
-    resultData.print
+    resultData.print.setParallelism(6)
 
     /*    val count = timedData.keyBy(0)
           .window(TumblingEventTimeWindows.of(Time.seconds(300)))
@@ -208,13 +213,13 @@ object LoggHandler {
 }
 
 
-class UrlTime(var url: String, var time: Double) extends Ordered[UrlTime] {
+class UrlTime(var uri: String, var time: Double) extends Ordered[UrlTime] {
   override def toString: String = {
-    url + " :" + time
+    uri + " :" + time
   }
 
   def compare(that: UrlTime) = {
-    if (this.url == that.url)
+    if (this.uri == that.uri)
       0
     else
       this.time.compareTo(that.time)
