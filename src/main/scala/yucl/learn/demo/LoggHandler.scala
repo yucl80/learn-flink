@@ -26,6 +26,44 @@ import scala.util.parsing.json.JSON
   * Created by YuChunlei on 2017/5/27.
   */
 object LoggHandler {
+
+  case class Rst(var count: Int, var bytes: Double, sessionSet: mutable.Set[String], ipSet: mutable.Set[String], count500: Int,var urlSet: mutable.TreeSet[UrlTime])
+
+  case class Result(system: String, count: Int, bytes: Double, sessionCount: Int, ipCount: Int, topUrl: mutable.Set[UrlTime], timestamp: Timestamp)
+
+  def aggregate(s: Rst, x: AccLog): Unit = {
+    s.count += 1
+    s.bytes += x.bytes
+    s.sessionSet += x.sessionid
+    s.ipSet += x.clientip
+    val topN = 10
+    if(s.urlSet == null){
+      s.urlSet = new mutable.TreeSet[UrlTime]()
+    }
+    if (s.urlSet != null) {
+      val vs = s.urlSet.filter(u => u.uri == x.uri)
+      if (vs.size > 0) {
+        val f = vs.last
+        if (f.time < x.time) {
+          s.urlSet -= vs.last
+          s.urlSet += new UrlTime(x.uri, x.time)
+        }
+      } else {
+        if (s.urlSet.size <= topN) {
+          s.urlSet += new UrlTime(x.uri, x.time)
+        } else {
+          val last = s.urlSet.last
+          if (x.time > last.time) {
+            s.urlSet += new UrlTime(x.uri, x.time)
+            s.urlSet -= s.urlSet.last
+          }
+        }
+      }
+    }
+
+
+  }
+
   def main(args: Array[String]) {
     val properties = new Properties
     properties.setProperty("bootstrap.servers", "192.168.21.27:9092")
@@ -33,7 +71,7 @@ object LoggHandler {
     properties.setProperty("group.id", "key-words-alert")
     val env: StreamExecutionEnvironment = StreamExecutionEnvironment.getExecutionEnvironment
     env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
-    env.enableCheckpointing(60000,CheckpointingMode.AT_LEAST_ONCE)
+   env.enableCheckpointing(10000,CheckpointingMode.AT_LEAST_ONCE)
 
     val stream: DataStream[String] = env.addSource(new FlinkKafkaConsumer08[String]("parsed-acclog", new SimpleStringSchema, properties))
     val data = stream.map(new MapFunction[String, AccLog] {
@@ -78,52 +116,79 @@ object LoggHandler {
         return new Watermark(currentMaxTimestamp - maxOutOfOrderness)
       }
     })
+    val keyedStream = timedData.keyBy(0)
+    val windowedData = keyedStream
+      .window(TumblingEventTimeWindows.of(Time.minutes(2)))
 
-    case class Result(var system: String, var count: Int, var bytes: Double, var sessionCount: Int, var ipCount: Int, var topUrl: mutable.Set[UrlTime],var timestamp: Timestamp)
-    val windowedData = timedData.keyBy(0)
-      .window(TumblingEventTimeWindows.of(Time.minutes(5)))
+
+    /* val result1 = windowedData.fold(new Rst(0,0d,new mutable.HashSet[String](),new mutable.HashSet[String](),0,new mutable.TreeSet[UrlTime]()),
+         (s: Rst, x: AccLog) => {
+          aggregate(s,x)
+           s
+         },
+         (key: Tuple, window: TimeWindow, input: Iterable[Rst],out: Collector[Result]) => {
+           input.foreach(e => {
+             try{
+               if (e != null)
+               out.collect(new Result(key.getField(0), e.count, e.bytes, e.sessionSet.size, e.ipSet.size, null,new Timestamp(window.getEnd)))
+             }catch {
+               case e :Exception => e.printStackTrace()
+             }
+
+           })
+
+         }
+       ).print()*/
+
+
 
 
     val resultData = windowedData.apply(new WindowFunction[AccLog, Result, Tuple, TimeWindow] {
       override def apply(key: Tuple, window: TimeWindow, input: Iterable[AccLog], out: Collector[Result]): Unit = {
-        val sessionSet = new mutable.HashSet[String]()
-        val ipSet = new mutable.HashSet[String]()
-        val urlSet = new mutable.TreeSet[UrlTime]()
-        val topN = 10
-        var count = 0
-        var bytes = 0d
+        val s = new Rst(0, 0d, new mutable.HashSet[String](), new mutable.HashSet[String](), 0, new mutable.TreeSet[UrlTime]())
         input.foreach(x => {
-          count += 1
-          bytes += x.bytes
-          sessionSet += x.sessionid
-          ipSet += x.clientip
-
-          val vs = urlSet.filter(u => u.uri == x.uri )
-          if (vs.size > 0) {
-            val f = vs.last
-            if(f.time < x.time){
-              urlSet -= vs.last
-              urlSet += new UrlTime(x.uri, x.time)
-            }
-          } else {
-            if (urlSet.size <= topN) {
-              urlSet += new UrlTime(x.uri, x.time)
-            } else {
-              val last = urlSet.last
-              if (x.time > last.time) {
-                urlSet += new UrlTime(x.uri, x.time)
-                urlSet -= urlSet.last
-              }
-            }
-
+          try {
+            aggregate(s, x)
+          } catch {
+            case e: Throwable => e.printStackTrace()
           }
-        })
 
-        out.collect(new Result(key.getField(0), count, bytes, sessionSet.size, ipSet.size, urlSet,new Timestamp(window.getEnd)))
+        })
+        try {
+          println(s.urlSet)
+          val r = new Result(key.getField(0), s.count, s.bytes, s.sessionSet.size, s.ipSet.size, s.urlSet, new Timestamp(window.getEnd))
+          out.collect(r)
+        } catch {
+          case e: Throwable => e.printStackTrace()
+        }
+
 
       }
     })
 
+    resultData.print()
+
+    /*keyedStream.window(EventTimeSessionWindows.withGap(Time.seconds(60)))
+    .apply(new WindowFunction[AccLog, (String,Long), Tuple, TimeWindow] {
+      override def apply(key: Tuple, window: TimeWindow, input: Iterable[AccLog], out: Collector[(String,Long)]): Unit = {
+        var sessionSet = new mutable.HashSet[String]()
+        input.foreach(e => {
+          sessionSet += e.sessionid
+        })
+        println(new Timestamp(window.getStart),new Timestamp(window.getEnd))
+        out.collect(key.getField(0),sessionSet.size)
+      }
+    }).print()*/
+
+
+    /*windowedData.fold(new mutable.HashSet[String](),
+      (s:mutable.HashSet[String], a:AccLog)=>{ s += a.sessionid},
+      (key: Tuple, window: TimeWindow, input: Iterable[mutable.HashSet[String]], out: Collector[mutable.HashSet[String]]) =>{
+         input.foreach(e => {
+            out.collect(e)
+         })
+      }
+    )*/
 
     /* val resultData = windowedData.apply(new WindowFunction[AccLog, Result, Tuple, TimeWindow] {
        override def apply(key: Tuple, window: TimeWindow, input: Iterable[AccLog], out: Collector[Result]): Unit = {
@@ -174,7 +239,7 @@ object LoggHandler {
      })
  */
 
-    resultData.print.setParallelism(6)
+    // resultData.print.setParallelism(6)
 
     /*    val count = timedData.keyBy(0)
           .window(TumblingEventTimeWindows.of(Time.seconds(300)))
@@ -203,7 +268,7 @@ object LoggHandler {
 
     try {
       env.setParallelism(2)
-      env.execute("key words alert")
+      env.execute("test")
     } catch {
       case e: Exception =>
         e.printStackTrace()
