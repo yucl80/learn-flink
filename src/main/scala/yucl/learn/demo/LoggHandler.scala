@@ -27,9 +27,6 @@ import scala.util.parsing.json.JSON
   */
 object LoggHandler {
 
-  case class Rst(var count: Int, var bytes: Double, sessionSet: mutable.Set[String], ipSet: mutable.Set[String], count500: Int,var urlSet: mutable.TreeSet[UrlTime])
-
-  case class Result(system: String, count: Int, bytes: Double, sessionCount: Int, ipCount: Int, topUrl: mutable.Set[UrlTime], timestamp: Timestamp)
 
   def aggregate(s: Rst, x: AccLog): Unit = {
     s.count += 1
@@ -37,9 +34,7 @@ object LoggHandler {
     s.sessionSet += x.sessionid
     s.ipSet += x.clientip
     val topN = 10
-    if(s.urlSet == null){
-      s.urlSet = new mutable.TreeSet[UrlTime]()
-    }
+
     if (s.urlSet != null) {
       val vs = s.urlSet.filter(u => u.uri == x.uri)
       if (vs.size > 0) {
@@ -145,7 +140,7 @@ object LoggHandler {
 
     val resultData = windowedData.apply(new WindowFunction[AccLog, Result, Tuple, TimeWindow] {
       override def apply(key: Tuple, window: TimeWindow, input: Iterable[AccLog], out: Collector[Result]): Unit = {
-        val s = new Rst(0, 0d, new mutable.HashSet[String](), new mutable.HashSet[String](), 0, new mutable.TreeSet[UrlTime]())
+        val s = new Rst(new mutable.TreeSet[UrlTime](),0, 0d, new mutable.HashSet[String](), new mutable.HashSet[String](), 0)
         input.foreach(x => {
           try {
             aggregate(s, x)
@@ -278,15 +273,4 @@ object LoggHandler {
 }
 
 
-class UrlTime(var uri: String, var time: Double) extends Ordered[UrlTime] {
-  override def toString: String = {
-    uri + " :" + time
-  }
 
-  def compare(that: UrlTime) = {
-    if (this.uri == that.uri)
-      0
-    else
-      this.time.compareTo(that.time)
-  }
-}

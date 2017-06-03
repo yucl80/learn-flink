@@ -18,9 +18,13 @@
 
 package org.apache.flink.streaming.scala.examples.socket
 
-import org.apache.flink.api.java.utils.ParameterTool
+import org.apache.flink.api.common.functions.FoldFunction
+import org.apache.flink.streaming.api.CheckpointingMode
+import org.apache.flink.streaming.api.functions.sink.SinkFunction
 import org.apache.flink.streaming.api.scala._
 import org.apache.flink.streaming.api.windowing.time.Time
+
+import scala.collection.mutable
 
 /**
  * Implements a streaming windowed version of the "WordCount" program.
@@ -39,10 +43,10 @@ object SocketWindowWordCount {
   def main(args: Array[String]) : Unit = {
 
     // the host and the port to connect to
-    var hostname: String = "192.168.16.16"
+    var hostname: String = "192.168.142.145"
     var port: Int = 9999
 
-    try {
+    /*try {
       val params = ParameterTool.fromArgs(args)
       hostname = if (params.has("hostname")) params.get("hostname") else "localhost"
       port = params.getInt("port")
@@ -55,28 +59,51 @@ object SocketWindowWordCount {
           "and type the input text into the command line")
         return
       }
-    }
+    }*/
     
     // get the execution environment
     val env: StreamExecutionEnvironment = StreamExecutionEnvironment.getExecutionEnvironment
-    
+
+    env.enableCheckpointing(60000,CheckpointingMode.AT_LEAST_ONCE)
     // get input data by connecting to the socket
     val text = env.socketTextStream(hostname, port, '\n')
 
     // parse the data, group it, window it, and aggregate the counts 
-    val windowCounts = text
+    val  windowedStream= text
           .flatMap { w => w.split("\\s") }
-          .map { w => WordWithCount(w, 1) }
-          .keyBy("word")
-          .timeWindow(Time.seconds(5))
-          .sum("count")
+          .map { w => WordWithCount("sys" ,w, 1) }
+          .keyBy("system")
+          .timeWindow(Time.seconds(60))
+
+     val windowCounts= windowedStream .sum("count")
 
     // print the results with a single thread, rather than in parallel
     windowCounts.print().setParallelism(1)
+
+    val foldData = windowedStream.fold(new mutable.HashSet[String](), new FoldFunction[WordWithCount, mutable.HashSet[String]]() {
+      override def fold(accumulator: mutable.HashSet[String], value: WordWithCount): mutable.HashSet[String] = {
+        accumulator += value.word
+      }
+    })
+
+
+
+
+
+
+    //foldData.print()
+
+    foldData.addSink(new SinkFunction[mutable.HashSet[String]] {
+      override def invoke(value: mutable.HashSet[String]): Unit = {
+          println(value)
+      }
+    })
+
+
 
     env.execute("Socket Window WordCount")
   }
 
   /** Data type for words with count */
-  case class WordWithCount(word: String, count: Long)
+  case class WordWithCount(system: String,word: String, count: Long)
 }
